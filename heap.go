@@ -1,4 +1,4 @@
-package pool
+package ordpool
 
 type resultHeap[O any] []*Result[O]
 

@@ -1,4 +1,4 @@
-package pool
+package ordpool
 
 type Result[O any] struct {
 	order  uint64

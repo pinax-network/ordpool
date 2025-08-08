@@ -1,4 +1,4 @@
-package pool
+package ordpool
 
 import (
 	"container/heap"
@@ -15,7 +15,7 @@ type WorkerFunc[I, O any] func(in I) (out O, err error)
 
 type WorkerPool[I, O any] struct {
 	inChan      chan inputData[I] // inChan is the channel we are writing the data into that we get when Process is called
-	aggChan     chan Result[O]    // aggChan is the channel each worker is writing the result of the WorkerFunc into
+	aggChan     chan *Result[O]   // aggChan is the channel each worker is writing the result of the WorkerFunc into
 	outChan     chan *Result[O]   // outChan is the channel holding the data from the aggChan in an ordered way
 	globalOrder uint64            // globalOrder is a global counter for the order
 	workers     []*worker[I, O]
@@ -24,10 +24,14 @@ type WorkerPool[I, O any] struct {
 	isRunning   bool
 }
 
-func NewPool[I, O any](numWorkers int, workerFunc WorkerFunc[I, O]) (*WorkerPool[I, O], <-chan *Result[O]) {
-	res := &WorkerPool[I, O]{
+// NewPool creates a new, ordered worker pool that allows processing continuous streams of data while preserving the
+// order of events.
+// Results are written to the output channel returned. The channel will be closed after Shutdown has been called and all
+// remaining inputs have been processed.
+func NewPool[I, O any](numWorkers int, workerFunc WorkerFunc[I, O]) (pool *WorkerPool[I, O], outputChan <-chan *Result[O]) {
+	pool = &WorkerPool[I, O]{
 		inChan:     make(chan inputData[I]),
-		aggChan:    make(chan Result[O]),
+		aggChan:    make(chan *Result[O]),
 		outChan:    make(chan *Result[O]),
 		workers:    make([]*worker[I, O], 0, numWorkers),
 		workerWg:   sync.WaitGroup{},
@@ -35,21 +39,24 @@ func NewPool[I, O any](numWorkers int, workerFunc WorkerFunc[I, O]) (*WorkerPool
 	}
 
 	for i := 0; i < numWorkers; i++ {
-		wrk := newWorker[I, O](i, res.inChan, res.aggChan, workerFunc)
-		res.workers = append(res.workers, wrk)
-		res.workerWg.Add(1)
+		wrk := newWorker[I, O](i, pool.inChan, pool.aggChan, workerFunc)
+		pool.workers = append(pool.workers, wrk)
+		pool.workerWg.Add(1)
 		go func(wrk *worker[I, O]) {
-			defer res.workerWg.Done()
-			wrk.Run()
+			defer pool.workerWg.Done()
+			wrk.run()
 		}(wrk)
 	}
 
-	go res.orderOutput()
-	res.isRunning = true
+	go pool.orderOutput()
+	pool.isRunning = true
 
-	return res, res.outChan
+	return pool, pool.outChan
 }
 
+// Process adds the given input to the pool to be processed by a worker. When done, the Result is pushed to the output
+// channel returned by NewPool in an ordered way.
+// Returns the global order for the input. In case Shutdown has already been called, an ErrNotRunning is returned.
 func (w *WorkerPool[I, O]) Process(in I) (uint64, error) {
 	if !w.isRunning {
 		return 0, ErrNotRunning
@@ -61,7 +68,14 @@ func (w *WorkerPool[I, O]) Process(in I) (uint64, error) {
 	return w.globalOrder, nil
 }
 
+// Shutdown gracefully shuts down the pool. It signals all workers to stop after finishing the input queue. When all
+// results are written, the output channel is closed.
+// Note that this is not blocking. The caller should wait for the output channel to be closed.
 func (w *WorkerPool[I, O]) Shutdown() {
+	if !w.isRunning {
+		return
+	}
+
 	w.isRunning = false
 	close(w.inChan)
 
@@ -69,11 +83,6 @@ func (w *WorkerPool[I, O]) Shutdown() {
 		w.workerWg.Wait()
 		close(w.aggChan)
 	}()
-
-	//for _, wrk := range w.workers {
-	//	wrk.Shutdown()
-	//}
-	//close(w.outChan)
 }
 
 // orderOutput listens on the aggChan for results from the workers and writes them into the outChan in order.
@@ -83,7 +92,7 @@ func (w *WorkerPool[I, O]) orderOutput() error {
 		select {
 		case res, ok := <-w.aggChan:
 			if ok {
-				heap.Push(w.resultHeap, &res)
+				heap.Push(w.resultHeap, res)
 			}
 
 			// Peek checks the heap element with the minimal order. If this matches the current order, then we found the

@@ -1,14 +1,14 @@
-package pool
+package ordpool
 
 type worker[I, O any] struct {
 	id            int
 	inputChan     chan inputData[I]
-	aggregateChan chan Result[O]
+	aggregateChan chan *Result[O]
 	workerFunc    WorkerFunc[I, O]
 	stopChan      chan bool
 }
 
-func newWorker[I, O any](id int, inputChan chan inputData[I], aggregateChan chan Result[O], workerFunc WorkerFunc[I, O]) *worker[I, O] {
+func newWorker[I, O any](id int, inputChan chan inputData[I], aggregateChan chan *Result[O], workerFunc WorkerFunc[I, O]) *worker[I, O] {
 	return &worker[I, O]{
 		id:            id,
 		inputChan:     inputChan,
@@ -18,7 +18,7 @@ func newWorker[I, O any](id int, inputChan chan inputData[I], aggregateChan chan
 	}
 }
 
-func (w *worker[I, O]) Run() {
+func (w *worker[I, O]) run() {
 	for {
 		select {
 		case <-w.stopChan:
@@ -28,11 +28,11 @@ func (w *worker[I, O]) Run() {
 				return
 			}
 			res, err := w.workerFunc(in.data)
-			w.aggregateChan <- Result[O]{order: in.order, result: res, err: err}
+			w.aggregateChan <- &Result[O]{order: in.order, result: res, err: err}
 		}
 	}
 }
 
-func (w *worker[I, O]) Shutdown() {
+func (w *worker[I, O]) shutdown() {
 	w.stopChan <- true
 }
